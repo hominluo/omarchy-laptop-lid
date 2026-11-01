@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.0.1
+
+- Mode rows use outline glyphs (power plug, outline battery, "zzz" sleep) and
+  the bar shows the sleep glyph when the lid will suspend, so the icon reads at
+  14 px instead of collapsing into a filled blob.
+- The lock-on-close row gets the same glyph column as the mode rows and a
+  lock/unlock icon that follows the toggle.
+- On plugin load, sweep away `systemd-inhibit` processes left behind by a
+  crashed shell before starting a new one, so a stale inhibitor cannot silently
+  keep a closed lid awake.
+
 ## 1.0.0
 
 - Bar widget and panel to choose what closing the lid does: keep running on

@@ -91,11 +91,14 @@ Panel {
     return "Stock behaviour: closing the lid suspends"
   }
 
+  // Outline glyphs on purpose: the filled battery (󰁹) and laptop-off (󰌣)
+  // codepoints collapse into unreadable blobs at the row's 14 px, so the rows
+  // use the outline battery and the "zzz" sleep symbol instead.
   function modeGlyph(m) {
     if (m === "awake") return "󰌢"
-    if (m === "ac") return "󰂄"
-    if (m === "battery") return "󰁹"
-    return "󰌣"
+    if (m === "ac") return "󰚥"
+    if (m === "battery") return "󰂎"
+    return "󰒲"
   }
 
   function heroTitle() {
@@ -168,12 +171,42 @@ Panel {
 
   // ---------- the inhibitor ----------
 
+  // A crashed shell does not take its children with it: systemd-inhibit survives
+  // reparented to the omarchy-shell wrapper, so the machine would keep believing
+  // the lid may be ignored with nothing on screen to show why. Sweep those
+  // orphans away before starting our own, and only arm the inhibitor after the
+  // sweep so it cannot shoot itself in the foot.
+  property bool cleanupDone: false
+
+  Process {
+    id: staleCleanup
+    // Bracket the first letter so this pattern cannot match the bash -c
+    // command line that contains it (pgrep -f matches the whole argv).
+    command: [
+      "bash", "-c",
+      'for pid in $(pgrep -u "$UID" -f -- "[s]ystemd-inhibit --what=handle-lid-switch --who=Omarchy lid policy"); do '
+        + 'kill -TERM "$pid" 2>/dev/null; '
+        + 'for child in $(pgrep -P "$pid"); do kill -TERM "$child" 2>/dev/null; done; '
+        + 'done; true'
+    ]
+    onExited: root.cleanupDone = true
+  }
+
+  // If the sweep somehow never reports back, stop waiting rather than leave the
+  // machine unable to keep itself awake.
+  Timer {
+    interval: 3000
+    repeat: false
+    running: !root.cleanupDone
+    onTriggered: root.cleanupDone = true
+  }
+
   // systemd-inhibit holds the inhibitor for as long as its child lives, so the
   // child is `sleep infinity` and the Process binding is the switch. Stopping it
   // sends SIGTERM, which drops the inhibitor and hands the lid back to logind.
   Process {
     id: inhibitor
-    running: root.shouldInhibit
+    running: root.shouldInhibit && root.cleanupDone
     command: [
       "systemd-inhibit",
       "--what=handle-lid-switch",
@@ -276,6 +309,7 @@ Panel {
 
   Component.onCompleted: {
     lidProbe.running = true
+    staleCleanup.running = true
     root.refreshPolicy()
   }
 
@@ -312,10 +346,10 @@ Panel {
     id: button
     anchors.fill: parent
     bar: root.bar
-    // 󰌢 md-laptop while it keeps running, 󰌣 md-laptop_off when the lid will
+    // 󰌢 md-laptop while it keeps running, 󰒲 md-power-sleep when the lid will
     // suspend it. The glyph says what will happen, so the bar is readable
     // without opening the panel.
-    text: root.shouldInhibit ? "󰌢" : "󰌣"
+    text: root.shouldInhibit ? "󰌢" : "󰒲"
     active: root.shouldInhibit
     tooltipText: root.barTooltip()
     onPressed: root.toggle()
@@ -350,7 +384,7 @@ Panel {
 
           Text {
             textFormat: Text.PlainText
-            text: root.shouldInhibit ? "󰌢" : "󰌣"
+            text: root.shouldInhibit ? "󰌢" : "󰒲"
             color: root.foreground
             font.family: root.bar ? root.bar.fontFamily : Style.font.family
             font.pixelSize: Style.font.display
@@ -431,9 +465,26 @@ Panel {
             implicitHeight: Math.max(lockLabels.implicitHeight, lockSwitch.implicitHeight) + Style.space(6)
             opacity: root.shouldInhibit ? 1.0 : 0.4
 
+            // Same glyph column as the mode rows, so the lock row lines up with
+            // them instead of starting flush against the panel edge.
+            Text {
+              id: lockGlyph
+              textFormat: Text.PlainText
+              text: root.lockOnLid ? "󰌾" : "󰌿"
+              color: root.foreground
+              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+              font.pixelSize: Style.font.title
+              width: Style.space(22)
+              horizontalAlignment: Text.AlignHCenter
+              anchors.left: parent.left
+              anchors.leftMargin: Style.space(6)
+              anchors.verticalCenter: parent.verticalCenter
+            }
+
             Column {
               id: lockLabels
-              anchors.left: parent.left
+              anchors.left: lockGlyph.right
+              anchors.leftMargin: Style.space(8)
               anchors.right: parent.right
               anchors.rightMargin: lockSwitch.width + Style.space(12)
               anchors.verticalCenter: parent.verticalCenter
@@ -441,7 +492,7 @@ Panel {
 
               Text {
                 textFormat: Text.PlainText
-                text: "Lock the screen when the lid closes"
+                text: "Lock screen on lid close"
                 color: root.foreground
                 font.family: root.bar ? root.bar.fontFamily : Style.font.family
                 font.pixelSize: Style.font.body
@@ -452,7 +503,7 @@ Panel {
               Text {
                 textFormat: Text.PlainText
                 text: root.shouldInhibit
-                  ? "Skipped while an external display is connected"
+                  ? "Skipped with an external display"
                   : "Only applies while the lid keeps it running"
                 color: root.dim
                 font.family: root.bar ? root.bar.fontFamily : Style.font.family
