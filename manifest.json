@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.hominluo.lid",
+  "name": "Laptop Lid",
+  "version": "1.0.0",
+  "author": "Homin Luo",
+  "license": "MIT",
+  "description": "Choose what closing the lid does - keep running, on AC only, on battery only, or suspend - from the bar, with no root, no password prompt and no system config to maintain.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Laptop Lid",
+    "description": "Lid-close policy: keeps the machine awake through a logind inhibitor, or steps out of the way and lets systemd suspend normally.",
+    "category": "System",
+    "aliases": [
+      "lid",
+      "clamshell",
+      "suspend",
+      "sleep",
+      "power"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
