@@ -17,8 +17,8 @@
 - External-display detection recognizes LVDS and DSI internal panels, so
   lock-on-close is not skipped on non-eDP laptops.
 - 0% battery is shown instead of being treated as "no reading".
-- The lid poll runs whenever an inhibitor is held, keeping the panel's lid state
-  truthful with the lock toggle off.
+- The lid poll runs in every mode, so the panel's lid state stays truthful even
+  when the plugin is not holding an inhibitor.
 
 ## 1.0.1
 

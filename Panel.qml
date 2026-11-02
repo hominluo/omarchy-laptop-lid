@@ -263,12 +263,13 @@ Panel {
   }
 
   // procfs inotify is not dependable across firmwares, so poll while it
-  // matters. Poll whenever an inhibitor is held, not only when the lock
-  // toggle is on, so the panel's "lid open/shut" line stays truthful.
+  // matters. The read is a single small procfs file, so it can run in every
+  // mode; that keeps the panel's "lid open/shut" line truthful even when the
+  // plugin is not holding an inhibitor.
   Timer {
     interval: 3000
     repeat: true
-    running: root.lidPath !== "" && root.shouldInhibit
+    running: root.lidPath !== ""
     onTriggered: lidFile.reload()
   }
 
