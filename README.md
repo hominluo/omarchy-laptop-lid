@@ -48,7 +48,7 @@ nothing until a mode is picked. "Suspend" here means the normal sleep-to-RAM
 `SleepOperation=` is configured.
 
 The bar glyph shows what will actually happen: a laptop while an inhibitor is
-held, a crossed-out laptop when closing the lid will suspend. Tooltip says it in
+held, a "zzz" sleep symbol when closing the lid will suspend. Tooltip says it in
 words.
 
 ## Lock on lid close
@@ -56,20 +56,23 @@ words.
 An inhibitor blocks `logind`'s whole lid action, including the lock-before-suspend
 that Omarchy normally gets. Left alone, an awake closed lid would unlock on
 open, so the plugin watches the ACPI lid switch itself and runs
-`omarchy system lock` — except while an external display is connected, because
-then closing the lid is docking, not walking away. The toggle is in the panel.
+`omarchy system lock` — except while an external display is connected (anything
+that is not an internal eDP, LVDS or DSI output), because then closing the lid
+is docking, not walking away. The toggle is in the panel.
 
 The lid switch is read from `/proc/acpi/button/lid/*/state`, with a 3 second
-poll only while an inhibitor is held and the lock toggle is on. procfs inotify
-is not dependable across firmwares, so the timer is the safety net.
+poll whenever an inhibitor is held. procfs inotify is not dependable across
+firmwares, so the timer is the safety net.
 
 ## Requirements
 
 - A laptop with an ACPI lid switch (`/proc/acpi/button/lid/*/state`).
-- `systemd-inhibit` (systemd) and `hyprctl` (Hyprland) — both already on Omarchy.
-- **No `HandleLidSwitch=ignore` drop-in.** The panel warns if one exists,
-  because it would outrank the plugin and make "Suspend" do nothing. Remove
-  `/etc/systemd/logind.conf.d/30-lid-ignore.conf` and
+- `systemd-inhibit` (systemd), `hyprctl` (Hyprland) and the `omarchy` CLI
+  (used for `omarchy system lock`) — all already on Omarchy.
+- **No effective `HandleLidSwitch=ignore` override.** The panel warns if
+  `HandleLidSwitch`, `HandleLidSwitchExternalPower` or `HandleLidSwitchDocked`
+  resolves to `ignore`, because it outranks the plugin and breaks the modes
+  that rely on suspending. Remove the drop-in and
   `sudo systemctl reload systemd-logind` if this plugin replaced a manual fix.
 
 ## Install
@@ -86,6 +89,21 @@ ln -s ~/.config/omarchy/plugins/io.github.hominluo.lid ~/Github/Omarchy/omarchy-
 
 The plugin stores its choice in
 `~/.local/state/omarchy/lid-policy/state.json` and re-applies it at shell start.
+
+## Scripting
+
+```bash
+omarchy-shell io.github.hominluo.lid.ctl status
+omarchy-shell io.github.hominluo.lid.ctl mode battery
+```
+
+`mode` accepts `awake`, `ac`, `battery` and `suspend` (case-insensitive) and
+prints the resulting mode. An unknown value prints an `invalid mode:` line and
+leaves the saved choice untouched.
+
+`status` returns JSON, including `requested` (what the policy wants),
+`inhibiting` (whether the inhibitor process is actually alive), and `conflict`
+(whether a system config override is in force).
 
 ## Files
 

@@ -44,17 +44,25 @@ Panel {
 
   property string lidPath: ""
   property bool lidClosed: false
-  // Last HandleLidSwitch= line in the system config, if any. Shown only when it
-  // contradicts what this plugin promises.
-  property string systemPolicy: ""
+  // Last value of each HandleLidSwitch* key in the merged system config.
+  // Populated from systemd-analyze so drop-in order, whitespace around "="
+  // and the ExternalPower/Docked variants are all resolved the way logind
+  // resolves them. Only read to warn when the config outranks this plugin.
+  property var systemPolicy: ({})
+
+  // Set as soon as the user picks anything, so a slow state-file load cannot
+  // overwrite a fresh choice.
+  property bool stateTouched: false
 
   readonly property bool onBattery: UPower.onBattery
   readonly property var battery: UPower.displayDevice
   readonly property bool batteryPresent: !!battery && battery.isPresent
   readonly property int batteryPercent: {
     var device = root.battery
-    if (!device || !device.isPresent || !(device.percentage > 0)) return -1
-    return Math.round(device.percentage * 100)
+    if (!device || !device.isPresent) return -1
+    var fraction = Number(device.percentage)
+    if (!isFinite(fraction)) return -1
+    return Math.round(Math.max(0, Math.min(1, fraction)) * 100)
   }
 
   // The one decision the whole plugin exists to make.
@@ -63,8 +71,14 @@ Panel {
     (mode === "ac" && !onBattery) ||
     (mode === "battery" && onBattery)
 
-  readonly property bool overrideActive: systemPolicy === "HandleLidSwitch=ignore"
-  readonly property bool policyConflicts: overrideActive && mode === "suspend"
+  // Any of the three keys can force the lid action to "nothing". The AC and
+  // battery modes also rely on logind suspending when the plugin is not
+  // inhibiting, so an ignore entry breaks those too, not just Suspend.
+  readonly property bool overrideActive:
+    systemPolicy.HandleLidSwitch === "ignore"
+      || systemPolicy.HandleLidSwitchExternalPower === "ignore"
+      || systemPolicy.HandleLidSwitchDocked === "ignore"
+  readonly property bool policyConflicts: overrideActive && mode !== "awake"
 
   readonly property color hoverFill: bar
     ? Style.hoverFillFor(bar.foreground, Color.accent)
@@ -102,8 +116,9 @@ Panel {
   }
 
   function heroTitle() {
-    if (root.policyConflicts) return "The system forces suspend off"
-    return root.shouldInhibit ? "Closing the lid keeps it running" : "Closing the lid suspends"
+    if (root.shouldInhibit) return "Closing the lid keeps it running"
+    if (root.policyConflicts) return "The system config ignores the lid"
+    return "Closing the lid suspends"
   }
 
   function heroMeta() {
@@ -116,14 +131,16 @@ Panel {
   }
 
   function barTooltip() {
-    if (!root.shouldInhibit) return "Lid close suspends"
-    if (root.onBattery) return "Lid close keeps it running on battery"
-    return "Lid close keeps it running on AC"
+    if (root.shouldInhibit)
+      return root.onBattery ? "Lid close keeps it running on battery" : "Lid close keeps it running on AC"
+    if (root.policyConflicts) return "System config ignores the lid close"
+    return "Lid close suspends"
   }
 
   // ---------- persistence ----------
 
   function loadState(t) {
+    if (root.stateTouched) return
     var parsed
     try {
       parsed = JSON.parse(String(t))
@@ -137,9 +154,15 @@ Panel {
   }
 
   function saveState() {
+    // Write to a private temp file and rename it into place: a shell crash or a
+    // second rapid click can otherwise leave a truncated state.json behind.
     saveProc.command = [
       "bash", "-c",
-      'mkdir -p "$0" && printf \'{"mode":"%s","lockOnLid":%s}\\n\' "$1" "$2" > "$0/state.json"',
+      'dir="$0"; '
+        + 'mkdir -p "$dir" || exit 1; '
+        + 'tmp="$dir/.state.$$.tmp"; '
+        + 'printf \'{"mode":"%s","lockOnLid":%s}\\n\' "$1" "$2" > "$tmp" || exit 1; '
+        + 'mv -f "$tmp" "$dir/state.json"',
       root.stateDir, root.mode, root.lockOnLid ? "true" : "false"
     ]
     saveProc.running = true
@@ -147,12 +170,14 @@ Panel {
 
   function setMode(m) {
     if (root.modeOrder.indexOf(m) === -1 || root.mode === m) return
+    root.stateTouched = true
     root.mode = m
     root.saveState()
   }
 
   function setLockOnLid(v) {
     if (root.lockOnLid === v) return
+    root.stateTouched = true
     root.lockOnLid = v
     root.saveState()
   }
@@ -185,8 +210,8 @@ Panel {
     command: [
       "bash", "-c",
       'for pid in $(pgrep -u "$UID" -f -- "[s]ystemd-inhibit --what=handle-lid-switch --who=Omarchy lid policy"); do '
-        + 'kill -TERM "$pid" 2>/dev/null; '
         + 'for child in $(pgrep -P "$pid"); do kill -TERM "$child" 2>/dev/null; done; '
+        + 'kill -TERM "$pid" 2>/dev/null; '
         + 'done; true'
     ]
     onExited: root.cleanupDone = true
@@ -237,12 +262,13 @@ Panel {
     onFileChanged: reload()
   }
 
-  // procfs inotify is not dependable across firmwares, so poll while it matters:
-  // only when we are inhibiting and would actually lock on close.
+  // procfs inotify is not dependable across firmwares, so poll while it
+  // matters. Poll whenever an inhibitor is held, not only when the lock
+  // toggle is on, so the panel's "lid open/shut" line stays truthful.
   Timer {
     interval: 3000
     repeat: true
-    running: root.lidPath !== "" && root.shouldInhibit && root.lockOnLid
+    running: root.lidPath !== "" && root.shouldInhibit
     onTriggered: lidFile.reload()
   }
 
@@ -275,13 +301,21 @@ Panel {
       var list = JSON.parse(String(json))
       for (var i = 0; i < list.length; i++) {
         var name = String(list[i].name || "")
-        if (name !== "" && name.indexOf("eDP") !== 0) external = true
+        if (name !== "" && !root.isInternalOutput(name)) external = true
       }
     } catch (e) {
       // A failed probe must not cost the lock: keep it unless we know better.
       external = false
     }
     if (!external) lockProc.running = true
+  }
+
+  // Internal panels are not always eDP: older Intel machines expose LVDS and
+  // ARM laptops DSI, and a name is case-insensitive. Treating any of those as
+  // "external" would silently skip the lock on every close.
+  function isInternalOutput(name) {
+    var n = String(name).toLowerCase()
+    return n.indexOf("edp") === 0 || n.indexOf("lvds") === 0 || n.indexOf("dsi") === 0
   }
 
   Process {
@@ -295,12 +329,23 @@ Panel {
     id: policyProbe
     command: [
       "bash", "-c",
-      'grep -hs "^HandleLidSwitch" /etc/systemd/logind.conf /etc/systemd/logind.conf.d/*.conf 2>/dev/null | tail -n 1'
+      'systemd-analyze cat-config systemd/logind.conf 2>/dev/null '
+        + '| grep -E "^[[:space:]]*HandleLidSwitch[A-Za-z]*[[:space:]]*=" || true'
     ]
     stdout: StdioCollector {
       waitForEnd: true
-      onStreamFinished: root.systemPolicy = text.trim()
+      onStreamFinished: root.applyPolicy(text)
     }
+  }
+
+  function applyPolicy(t) {
+    var map = ({})
+    var lines = String(t).split("\n")
+    for (var i = 0; i < lines.length; i++) {
+      var m = /^\s*(HandleLidSwitch[A-Za-z]*)\s*=\s*(\S+)/.exec(lines[i])
+      if (m) map[m[1]] = m[2].toLowerCase()
+    }
+    root.systemPolicy = map
   }
 
   function refreshPolicy() {
@@ -323,7 +368,10 @@ Panel {
     target: "io.github.hominluo.lid.ctl"
 
     function mode(m: string): string {
-      root.setMode(String(m))
+      var v = String(m).trim().toLowerCase()
+      if (root.modeOrder.indexOf(v) === -1)
+        return "invalid mode: " + v + " (expected " + root.modeOrder.join(", ") + ")"
+      root.setMode(v)
       return root.mode
     }
 
@@ -331,8 +379,11 @@ Panel {
       return JSON.stringify({
         mode: root.mode,
         lockOnLid: root.lockOnLid,
-        inhibiting: root.shouldInhibit,
-        onBattery: root.onBattery
+        requested: root.shouldInhibit,
+        inhibiting: inhibitor.running,
+        conflict: root.policyConflicts,
+        onBattery: root.onBattery,
+        policy: root.systemPolicy
       })
     }
   }
@@ -531,7 +582,9 @@ Panel {
           spacing: Style.space(6)
 
           // The one thing an inhibitor cannot do is outrank the system config.
-          // If a drop-in still says ignore, every suspend option here is a lie.
+          // If a drop-in says ignore, every mode that expects logind to suspend
+          // is a lie - not only Suspend, but also the unplugged half of "AC"
+          // and the plugged half of "Battery".
           PanelSeparator {
             foreground: root.foreground
             visible: root.policyConflicts
@@ -542,8 +595,10 @@ Panel {
             visible: root.policyConflicts
             width: parent.width
             wrapMode: Text.WordWrap
-            text: "The system config still forces the lid to do nothing, so Suspend will not work. Remove "
-              + "/etc/systemd/logind.conf.d/30-lid-ignore.conf and reload systemd-logind."
+            text: "A HandleLidSwitch=ignore entry in the system config outranks this plugin, "
+              + "so the modes that rely on suspending may not work (the docked and "
+              + "external-power variants count too). Remove that drop-in "
+              + "(for example /etc/systemd/logind.conf.d/30-lid-ignore.conf) and reload systemd-logind."
             color: root.foreground
             font.family: root.bar ? root.bar.fontFamily : Style.font.family
             font.pixelSize: Style.font.caption

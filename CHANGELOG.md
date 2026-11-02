@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.0.2
+
+- `ctl status` now reports the live inhibitor process (`inhibiting`) separately
+  from what the policy wants (`requested`), and includes `conflict` plus the
+  parsed `policy`.
+- `ctl mode` validates its argument, accepts any case, and prints an
+  `invalid mode:` line instead of silently returning the current mode.
+- State writes go through a private temp file and a rename, so a crash or rapid
+  clicking cannot leave a truncated `state.json`. A slow state load can no
+  longer overwrite a choice made right after the shell starts.
+- The system-policy probe uses `systemd-analyze cat-config` and understands
+  whitespace plus the `HandleLidSwitchExternalPower`/`Docked` variants. The
+  warning now covers the AC and battery modes too, since they also depend on
+  logind suspending when the plugin is not inhibiting.
+- External-display detection recognizes LVDS and DSI internal panels, so
+  lock-on-close is not skipped on non-eDP laptops.
+- 0% battery is shown instead of being treated as "no reading".
+- The lid poll runs whenever an inhibitor is held, keeping the panel's lid state
+  truthful with the lock toggle off.
+
 ## 1.0.1
 
 - Mode rows use outline glyphs (power plug, outline battery, "zzz" sleep) and
