@@ -47,9 +47,13 @@ nothing until a mode is picked. "Suspend" here means the normal sleep-to-RAM
 (`s2idle` on modern laptops) — the same thing as `systemctl sleep` unless a
 `SleepOperation=` is configured.
 
-The bar glyph shows what will actually happen: a laptop while an inhibitor is
-held, a "zzz" sleep symbol when closing the lid will suspend. Tooltip says it in
-words.
+The bar glyph is the chosen mode's glyph, the same one its row uses in the
+panel: a laptop for **Keep running**, a plug for **Keep running on AC**, a
+battery for **Keep running on battery**, and a "zzz" symbol for **Suspend**.
+Colour carries no meaning — the bar's active colour is the urgent red, which
+made a healthy "keep running" look like a fault and still left three of the four
+modes looking identical. The tooltip names the mode and what it does on the
+current power source, so "Keep running on AC" on battery reads as suspending.
 
 ## Lock on lid close
 

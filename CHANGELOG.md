@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.0.3
+
+- The bar and the panel header show one glyph per mode instead of a single
+  laptop icon that turned the bar's urgent red whenever the inhibitor was held.
+  "Keep running", "Keep running on AC", "Keep running on battery" and "Suspend"
+  are now a laptop, a plug, an outline battery and "zzz", matching their rows.
+- The icon no longer uses the active colour at all, so a healthy keep-running
+  policy does not read as an alert.
+- The tooltip names the mode and its current outcome, so an AC-only policy
+  running on battery says "lid close suspends (on battery)".
+
 ## 1.0.2
 
 - `ctl status` now reports the live inhibitor process (`inhibiting`) separately

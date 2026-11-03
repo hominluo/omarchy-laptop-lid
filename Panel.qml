@@ -115,6 +115,14 @@ Panel {
     return "󰒲"
   }
 
+  // The bar and the panel header wear the same glyph as the mode's row, so a
+  // mode is one shape everywhere. Colour carries no meaning: the bar's active
+  // colour is the urgent red, which made a perfectly healthy "keep running"
+  // look like an error, and three of the four modes looked identical anyway.
+  function barGlyph() {
+    return root.modeGlyph(root.mode)
+  }
+
   function heroTitle() {
     if (root.shouldInhibit) return "Closing the lid keeps it running"
     if (root.policyConflicts) return "The system config ignores the lid"
@@ -130,11 +138,17 @@ Panel {
     return bits.join("  ·  ")
   }
 
+  // The glyph names the chosen mode, so the tooltip has to say what that mode
+  // does right now - on the other power source an "AC" policy still suspends.
   function barTooltip() {
-    if (root.shouldInhibit)
-      return root.onBattery ? "Lid close keeps it running on battery" : "Lid close keeps it running on AC"
-    if (root.policyConflicts) return "System config ignores the lid close"
-    return "Lid close suspends"
+    var policy = root.modeTitle(root.mode)
+    if (root.policyConflicts) return policy + " · system config ignores the lid"
+    var outcome
+    if (root.shouldInhibit) outcome = "lid close keeps it running"
+    else if (root.mode === "ac") outcome = "lid close suspends (on battery)"
+    else if (root.mode === "battery") outcome = "lid close suspends (plugged in)"
+    else outcome = "lid close suspends"
+    return policy + " · " + outcome
   }
 
   // ---------- persistence ----------
@@ -398,11 +412,12 @@ Panel {
     id: button
     anchors.fill: parent
     bar: root.bar
-    // 󰌢 md-laptop while it keeps running, 󰒲 md-power-sleep when the lid will
-    // suspend it. The glyph says what will happen, so the bar is readable
-    // without opening the panel.
-    text: root.shouldInhibit ? "󰌢" : "󰒲"
-    active: root.shouldInhibit
+    // One glyph per mode, the same shapes the panel rows use: laptop for keep
+    // running, plug for AC only, battery for battery only, "zzz" for suspend.
+    // The icon names the policy; the tooltip can still correct it when the
+    // current power source makes the outcome different.
+    text: root.barGlyph()
+    active: false
     tooltipText: root.barTooltip()
     onPressed: root.toggle()
   }
@@ -436,7 +451,7 @@ Panel {
 
           Text {
             textFormat: Text.PlainText
-            text: root.shouldInhibit ? "󰌢" : "󰒲"
+            text: root.barGlyph()
             color: root.foreground
             font.family: root.bar ? root.bar.fontFamily : Style.font.family
             font.pixelSize: Style.font.display
