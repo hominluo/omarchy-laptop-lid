@@ -1,5 +1,31 @@
 # Changelog
 
+## 1.1.0
+
+- `Keep running on AC` no longer keeps the machine awake after the charger is
+  pulled when a USB-C/UCSI port keeps reporting `online=1`. "Plugged in" now
+  follows logind's own `OnExternalPower` - the flag logind branches on - and a
+  battery that is actually discharging overrides it, so the two halves of a
+  per-source mode can no longer contradict the pack.
+- The system-policy warning reads logind's live D-Bus properties instead of
+  grepping the config files, so it survives a drop-in that was removed without
+  reloading logind and it covers every action that is not a sleep: `ignore`,
+  `lock`, `poweroff`, `reboot`, `halt`, `kexec`, not only `HandleLidSwitch=ignore`.
+- `handle-lid-switch` is re-armed if the inhibitor dies (a logind restart or an
+  OOM kill drops the child without touching the policy), instead of staying
+  silently released until the mode changes.
+- With a dock or an external display the panel says logind is using its docked
+  action (`ignore` by default) instead of claiming a lid close will suspend.
+- Omarchy 4.5 ships its own `switch:on:Lid Switch` hook
+  (`omarchy-system-lid-close`). When it is running the plugin leaves the lock to
+  it, so the lock toggle no longer implies it can turn that lock off.
+- The first lid sample after a shell restart is a baseline, so restarting the
+  shell with the lid shut no longer locks the screen.
+- A second mode click while a state write is in flight is queued instead of
+  dropped.
+- `ctl status` also reports `onExternalPower`, `batteryDischarging`,
+  `lidAction`, `docked`, `nativeLidLock` and whether logind answered.
+
 ## 1.0.3
 
 - The bar and the panel header show one glyph per mode instead of a single

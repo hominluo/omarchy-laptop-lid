@@ -19,13 +19,23 @@ import qs.Commons
 // Omarchy's lock-before-suspend, so nothing would lock the screen on close. That
 // is why the lock toggle below exists: it watches the ACPI lid switch and locks
 // itself, except while an external display is connected (where closing the lid
-// is docking, not walking away).
+// is docking, not walking away). Newer Omarchy has its own switch:on:Lid Switch
+// binding for exactly that; when it is present the plugin leaves the locking to
+// it instead of firing a second lock.
 //
 // Modes:
 //   awake   - keep running on battery and AC
 //   ac      - keep running only while plugged in, stock suspend on battery
 //   battery - keep running only on battery, stock suspend on AC
 //   suspend - never inhibit, stock logind behaviour
+//
+// "Plugged in" is deliberately not UPower's OnBattery. That flag aggregates
+// every line-power device, USB-C/UCSI ports included, and a port whose "online"
+// attribute goes stale after the cable is pulled keeps it false forever - so an
+// "AC only" policy would never let go. The decision instead mirrors logind,
+// which picks the lid action from its own OnExternalPower, and a battery that
+// is actually discharging vetoes both: if the pack is draining, the machine is
+// running on it no matter what a port claims.
 Panel {
   id: root
   moduleName: "io.github.hominluo.lid"
@@ -44,19 +54,32 @@ Panel {
 
   property string lidPath: ""
   property bool lidClosed: false
-  // Last value of each HandleLidSwitch* key in the merged system config.
-  // Populated from systemd-analyze so drop-in order, whitespace around "="
-  // and the ExternalPower/Docked variants are all resolved the way logind
-  // resolves them. Only read to warn when the config outranks this plugin.
-  property var systemPolicy: ({})
+  // The first read is a baseline, not a lid close: a shell restart with the lid
+  // already shut must not lock the screen.
+  property bool lidSeen: false
+
+  // Effective logind policy, read from the running daemon. The config files in
+  // /etc/systemd/logind.conf.d are not the truth - a drop-in can be removed
+  // without reloading logind - and "ignore" is only one of several actions that
+  // fail to suspend.
+  property var logind: ({})
+  property bool logindReady: false
+  property bool logindExternalPower: true
+
+  // Omarchy ships its own lid-close hook (a Hyprland switch binding) that locks
+  // the session. When it is active the toggle below cannot switch that off, so
+  // the plugin stops locking itself and the row says who is doing it.
+  property bool nativeLidLock: false
 
   // Set as soon as the user picks anything, so a slow state-file load cannot
   // overwrite a fresh choice.
   property bool stateTouched: false
+  // A second click while a save is in flight must not be dropped.
+  property bool savePending: false
 
-  readonly property bool onBattery: UPower.onBattery
   readonly property var battery: UPower.displayDevice
   readonly property bool batteryPresent: !!battery && battery.isPresent
+  readonly property bool batteryDischarging: root.batteryPresent && battery.state === UPowerDeviceState.Discharging
   readonly property int batteryPercent: {
     var device = root.battery
     if (!device || !device.isPresent) return -1
@@ -65,20 +88,56 @@ Panel {
     return Math.round(Math.max(0, Math.min(1, fraction)) * 100)
   }
 
+  // logind is the authority here: it is the process that decides what a lid
+  // close does, and OnExternalPower is the flag it branches on. UPower is only
+  // the fallback for systems where busctl cannot be reached.
+  readonly property bool onExternalPower:
+    root.logindReady ? root.logindExternalPower : !UPower.onBattery
+  readonly property bool onBattery: root.batteryDischarging || !root.onExternalPower
+
   // The one decision the whole plugin exists to make.
   readonly property bool shouldInhibit:
     mode === "awake" ||
     (mode === "ac" && !onBattery) ||
     (mode === "battery" && onBattery)
 
-  // Any of the three keys can force the lid action to "nothing". The AC and
-  // battery modes also rely on logind suspending when the plugin is not
-  // inhibiting, so an ignore entry breaks those too, not just Suspend.
-  readonly property bool overrideActive:
-    systemPolicy.HandleLidSwitch === "ignore"
-      || systemPolicy.HandleLidSwitchExternalPower === "ignore"
-      || systemPolicy.HandleLidSwitchDocked === "ignore"
-  readonly property bool policyConflicts: overrideActive && mode !== "awake"
+  // The action logind would take with no inhibitor in the way, resolved the
+  // same way logind resolves it: docked/external display first, then external
+  // power, then the plain lid action.
+  readonly property string lidAction: {
+    var cfg = root.logind
+    var main = typeof cfg.HandleLidSwitch === "string" && cfg.HandleLidSwitch !== ""
+      ? cfg.HandleLidSwitch
+      : "suspend"
+    if (cfg.Docked === true)
+      return typeof cfg.HandleLidSwitchDocked === "string" && cfg.HandleLidSwitchDocked !== ""
+        ? cfg.HandleLidSwitchDocked
+        : "ignore"
+    var external = cfg.HandleLidSwitchExternalPower
+    if (typeof external === "string" && external !== "" && root.logindExternalPower)
+      return external
+    return main
+  }
+
+  // Which setting produced lidAction, so the warning can name the drop-in
+  // key the user has to go and fix.
+  readonly property string lidActionSource: {
+    var cfg = root.logind
+    if (cfg.Docked === true) return "HandleLidSwitchDocked"
+    if (typeof cfg.HandleLidSwitchExternalPower === "string"
+        && cfg.HandleLidSwitchExternalPower !== ""
+        && root.logindExternalPower) return "HandleLidSwitchExternalPower"
+    return "HandleLidSwitch"
+  }
+
+  // Only these put the machine to sleep. "ignore" leaves it awake, "lock" only
+  // locks the screen, and poweroff/reboot/halt take it down.
+  readonly property bool lidActionSleeps:
+    ["suspend", "hibernate", "hybrid-sleep", "suspend-then-hibernate"].indexOf(root.lidAction) !== -1
+
+  // An awake policy outranks the system config; everything else depends on
+  // logind still being willing to sleep.
+  readonly property bool policyConflicts: root.logindReady && !root.lidActionSleeps && root.mode !== "awake"
 
   readonly property color hoverFill: bar
     ? Style.hoverFillFor(bar.foreground, Color.accent)
@@ -123,10 +182,26 @@ Panel {
     return root.modeGlyph(root.mode)
   }
 
+  // What a lid close actually does right now, in the words logind would use.
+  // Bare infinitives, so every sentence below can be built from one table.
+  function lidActionVerb(a) {
+    if (a === "suspend") return "suspend"
+    if (a === "hibernate") return "hibernate"
+    if (a === "hybrid-sleep") return "hybrid sleep"
+    if (a === "suspend-then-hibernate") return "suspend, then hibernate"
+    if (a === "lock") return "only lock the screen"
+    if (a === "poweroff") return "power the machine off"
+    if (a === "reboot" || a === "soft-reboot") return "reboot"
+    if (a === "kexec") return "reboot via kexec"
+    if (a === "halt") return "halt"
+    if (a === "sleep") return "sleep"
+    if (a === "ignore") return "do nothing"
+    return "do " + a
+  }
+
   function heroTitle() {
-    if (root.shouldInhibit) return "Closing the lid keeps it running"
-    if (root.policyConflicts) return "The system config ignores the lid"
-    return "Closing the lid suspends"
+    if (root.shouldInhibit) return "Closing the lid will keep it running"
+    return "Closing the lid will " + root.lidActionVerb(root.lidAction)
   }
 
   function heroMeta() {
@@ -140,15 +215,39 @@ Panel {
 
   // The glyph names the chosen mode, so the tooltip has to say what that mode
   // does right now - on the other power source an "AC" policy still suspends.
+  function outcomeText() {
+    if (root.shouldInhibit) return "lid close will keep it running"
+    var outcome = "lid close will " + root.lidActionVerb(root.lidAction)
+    if (root.mode === "ac") return outcome + " (on battery)"
+    if (root.mode === "battery") return outcome + " (plugged in)"
+    return outcome
+  }
+
   function barTooltip() {
     var policy = root.modeTitle(root.mode)
-    if (root.policyConflicts) return policy + " · system config ignores the lid"
-    var outcome
-    if (root.shouldInhibit) outcome = "lid close keeps it running"
-    else if (root.mode === "ac") outcome = "lid close suspends (on battery)"
-    else if (root.mode === "battery") outcome = "lid close suspends (plugged in)"
-    else outcome = "lid close suspends"
-    return policy + " · " + outcome
+    if (root.policyConflicts) return policy + " · system config: lid close will " + root.lidActionVerb(root.lidAction)
+    return policy + " · " + root.outcomeText()
+  }
+
+  // Docked is the common case and has a different remedy from a drop-in, so
+  // name the setting that is actually in force.
+  function conflictMessage() {
+    var verb = root.lidActionVerb(root.lidAction)
+    if (root.lidActionSource === "HandleLidSwitchDocked")
+      return "A dock or external display is connected, so logind uses its docked action and "
+        + "a lid close will " + verb + " (HandleLidSwitchDocked, ignore by default). "
+        + "This is stock logind behaviour, not a fault: unplug the display, or set "
+        + "HandleLidSwitchDocked, if the suspend modes should apply while docked."
+    return "logind's " + root.lidActionSource + " setting makes a lid close " + verb
+      + ", so the modes that step aside will not sleep. A drop-in in "
+      + "/etc/systemd/logind.conf.d outranks this plugin - a leftover 30-lid-ignore.conf "
+      + "is the usual one. Remove it and reload systemd-logind."
+  }
+
+  function lockRowSubtitle() {
+    if (root.nativeLidLock) return "Omarchy locks on lid close"
+    if (root.shouldInhibit) return "Skipped with an external display"
+    return "Only applies while the lid keeps it running"
   }
 
   // ---------- persistence ----------
@@ -170,6 +269,12 @@ Panel {
   function saveState() {
     // Write to a private temp file and rename it into place: a shell crash or a
     // second rapid click can otherwise leave a truncated state.json behind.
+    // Clicking faster than the write finishes queues one more save instead of
+    // silently losing the last choice.
+    if (saveProc.running) {
+      root.savePending = true
+      return
+    }
     saveProc.command = [
       "bash", "-c",
       'dir="$0"; '
@@ -206,6 +311,11 @@ Panel {
 
   Process {
     id: saveProc
+    onExited: {
+      if (!root.savePending) return
+      root.savePending = false
+      root.saveState()
+    }
   }
 
   // ---------- the inhibitor ----------
@@ -241,11 +351,16 @@ Panel {
   }
 
   // systemd-inhibit holds the inhibitor for as long as its child lives, so the
-  // child is `sleep infinity` and the Process binding is the switch. Stopping it
-  // sends SIGTERM, which drops the inhibitor and hands the lid back to logind.
+  // child is `sleep infinity` and this process is the switch. Stopping it sends
+  // SIGTERM, which drops the inhibitor and hands the lid back to logind.
+  //
+  // Driven by syncInhibitor() instead of a `running:` binding: the binding form
+  // breaks the moment JS writes the property, and the retry below has to write
+  // it. A logind restart or an OOM kill takes the child down without touching
+  // shouldInhibit, and an inhibitor that is silently gone is exactly the failure
+  // this plugin exists to avoid.
   Process {
     id: inhibitor
-    running: root.shouldInhibit && root.cleanupDone
     command: [
       "systemd-inhibit",
       "--what=handle-lid-switch",
@@ -254,7 +369,26 @@ Panel {
       "--mode=block",
       "sleep", "infinity"
     ]
+    onExited: {
+      if (root.shouldInhibit && root.cleanupDone) rearmTimer.restart()
+    }
   }
+
+  Timer {
+    id: rearmTimer
+    interval: 3000
+    repeat: false
+    onTriggered: root.syncInhibitor()
+  }
+
+  function syncInhibitor() {
+    var want = root.shouldInhibit && root.cleanupDone
+    if (want === inhibitor.running) return
+    inhibitor.running = want
+  }
+
+  onShouldInhibitChanged: root.syncInhibitor()
+  onCleanupDoneChanged: root.syncInhibitor()
 
   // ---------- lid switch ----------
 
@@ -289,13 +423,18 @@ Panel {
 
   function applyLidState(t) {
     var closed = /closed/i.test(String(t))
+    var firstSample = !root.lidSeen
+    root.lidSeen = true
     var wasOpen = !root.lidClosed
     root.lidClosed = closed
-    if (closed && wasOpen) root.lidClosedNow()
+    if (!firstSample && closed && wasOpen) root.lidClosedNow()
   }
 
   function lidClosedNow() {
     if (!root.shouldInhibit || !root.lockOnLid) return
+    // Omarchy's own switch:on:Lid Switch binding already ran
+    // omarchy-system-lid-close; a second lock here only races it.
+    if (root.nativeLidLock) return
     monitorProbe.running = true
   }
 
@@ -338,42 +477,151 @@ Panel {
     command: ["omarchy", "system", "lock"]
   }
 
-  // ---------- system policy ----------
-
+  // Does Omarchy itself lock on a lid close? Its binding runs
+  // omarchy-system-lid-close from the switch event, independently of any
+  // inhibitor, so when it is present the toggle below cannot turn that off and
+  // the plugin must not add a second lock.
   Process {
-    id: policyProbe
+    id: nativeLidProbe
     command: [
       "bash", "-c",
-      'systemd-analyze cat-config systemd/logind.conf 2>/dev/null '
-        + '| grep -E "^[[:space:]]*HandleLidSwitch[A-Za-z]*[[:space:]]*=" || true'
+      'command -v omarchy-system-lid-close >/dev/null 2>&1 || exit 1; '
+        + 'hyprctl -j binds 2>/dev/null | grep -q "switch:on:Lid Switch"'
+    ]
+    onExited: (exitCode) => root.nativeLidLock = exitCode === 0
+  }
+
+  // ---------- system policy + power source (live, from logind) ----------
+
+  // The whole vtable in one process: five busctl spawns, only when something
+  // changed or the panel is open. HandleLidSwitch* are const properties, so
+  // they only move when logind itself reloads.
+  Process {
+    id: logindProbe
+    command: [
+      "bash", "-c",
+      'm=org.freedesktop.login1.Manager; '
+        + 'for p in HandleLidSwitch HandleLidSwitchExternalPower HandleLidSwitchDocked Docked OnExternalPower; do '
+        + 'v=$(busctl get-property org.freedesktop.login1 /org/freedesktop/login1 "$m" "$p" 2>/dev/null) || continue; '
+        + 'printf "%s=%s\n" "$p" "$v"; '
+        + 'done'
     ]
     stdout: StdioCollector {
       waitForEnd: true
-      onStreamFinished: root.applyPolicy(text)
+      onStreamFinished: root.applyLogind(text)
     }
   }
 
-  function applyPolicy(t) {
-    var map = ({})
+  // OnExternalPower has no PropertiesChanged signal, and it is the one value
+  // that has to track a pulled cable. One busctl call, and only while a mode
+  // actually depends on the power source.
+  Process {
+    id: powerProbe
+    command: [
+      "busctl", "get-property", "org.freedesktop.login1", "/org/freedesktop/login1",
+      "org.freedesktop.login1.Manager", "OnExternalPower"
+    ]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.applyPower(text)
+    }
+  }
+
+  function parseBool(raw) {
+    var m = /^b\s+(true|false)$/.exec(String(raw).trim())
+    return m ? m[1] === "true" : undefined
+  }
+
+  function parseString(raw) {
+    var m = /^s\s+"(.*)"$/.exec(String(raw).trim())
+    return m ? m[1] : undefined
+  }
+
+  function applyLogind(t) {
+    var next = ({})
+    var parsedAny = false
     var lines = String(t).split("\n")
     for (var i = 0; i < lines.length; i++) {
-      var m = /^\s*(HandleLidSwitch[A-Za-z]*)\s*=\s*(\S+)/.exec(lines[i])
-      if (m) map[m[1]] = m[2].toLowerCase()
+      var at = lines[i].indexOf("=")
+      if (at <= 0) continue
+      var key = lines[i].substring(0, at)
+      var raw = lines[i].substring(at + 1)
+      var str = root.parseString(raw)
+      if (str !== undefined) {
+        next[key] = str
+        parsedAny = true
+        continue
+      }
+      var bool = root.parseBool(raw)
+      if (bool !== undefined) {
+        next[key] = bool
+        parsedAny = true
+      }
     }
-    root.systemPolicy = map
+    if (!parsedAny) {
+      // logind gone or busctl missing: fall back to UPower rather than keep a
+      // stale policy around that would make every label a guess.
+      root.logindReady = false
+      return
+    }
+    root.logind = next
+    if (typeof next.OnExternalPower === "boolean")
+      root.logindExternalPower = next.OnExternalPower
+    root.logindReady = true
   }
 
-  function refreshPolicy() {
-    policyProbe.running = true
+  function applyPower(t) {
+    var v = root.parseBool(t)
+    if (v === undefined) {
+      root.logindReady = false
+      return
+    }
+    root.logindExternalPower = v
+    root.logindReady = true
+  }
+
+  function refreshPower() {
+    if (!powerProbe.running) powerProbe.running = true
+  }
+
+  function refreshLogind() {
+    if (!logindProbe.running) logindProbe.running = true
+  }
+
+  Timer {
+    interval: 5000
+    repeat: true
+    running: root.mode === "ac" || root.mode === "battery" || root.opened
+    onTriggered: root.refreshPower()
+  }
+
+  // UPower still watches the pack and reports charging state changes, which is
+  // the fastest signal that the cable moved - read logind's answer right then.
+  Connections {
+    target: root.battery
+    function onStateChanged() { root.refreshPower() }
+  }
+
+  onModeChanged: {
+    root.refreshPower()
+    // The policy block is cheap but pointless on every tick; the timer above
+    // covers the power half, and this keeps the docked/external-power branch
+    // honest when the user switches modes.
+    root.refreshLogind()
   }
 
   Component.onCompleted: {
     lidProbe.running = true
     staleCleanup.running = true
-    root.refreshPolicy()
+    nativeLidProbe.running = true
+    root.refreshPower()
+    root.refreshLogind()
   }
 
-  onOpenedChanged: if (opened) root.refreshPolicy()
+  onOpenedChanged: if (opened) {
+    root.refreshPower()
+    root.refreshLogind()
+  }
 
   // Scriptable control, so a keybinding or a hook can flip the policy without
   // opening the panel:
@@ -398,7 +646,13 @@ Panel {
         inhibiting: inhibitor.running,
         conflict: root.policyConflicts,
         onBattery: root.onBattery,
-        policy: root.systemPolicy
+        onExternalPower: root.onExternalPower,
+        batteryDischarging: root.batteryDischarging,
+        lidAction: root.lidAction,
+        docked: root.logindReady && root.logind.Docked === true,
+        nativeLidLock: root.nativeLidLock,
+        logind: root.logindReady,
+        policy: root.logind
       })
     }
   }
@@ -537,7 +791,7 @@ Panel {
             Text {
               id: lockGlyph
               textFormat: Text.PlainText
-              text: root.lockOnLid ? "󰌾" : "󰌿"
+              text: root.lockOnLid || root.nativeLidLock ? "󰌾" : "󰌿"
               color: root.foreground
               font.family: root.bar ? root.bar.fontFamily : Style.font.family
               font.pixelSize: Style.font.title
@@ -569,9 +823,7 @@ Panel {
 
               Text {
                 textFormat: Text.PlainText
-                text: root.shouldInhibit
-                  ? "Skipped with an external display"
-                  : "Only applies while the lid keeps it running"
+                text: root.lockRowSubtitle()
                 color: root.dim
                 font.family: root.bar ? root.bar.fontFamily : Style.font.family
                 font.pixelSize: Style.font.caption
@@ -584,8 +836,11 @@ Panel {
               id: lockSwitch
               anchors.right: parent.right
               anchors.verticalCenter: parent.verticalCenter
-              checked: root.lockOnLid
-              interactive: root.shouldInhibit
+              // With Omarchy's own hook in place the toggle has nothing left to
+              // control, so it reports what actually happens and stops
+              // pretending to be a switch.
+              checked: root.nativeLidLock ? true : root.lockOnLid
+              interactive: root.shouldInhibit && !root.nativeLidLock
               foreground: root.foreground
               onToggled: root.setLockOnLid(!root.lockOnLid)
             }
@@ -597,10 +852,10 @@ Panel {
           width: parent.width
           spacing: Style.space(6)
 
-          // The one thing an inhibitor cannot do is outrank the system config.
-          // If a drop-in says ignore, every mode that expects logind to suspend
-          // is a lie - not only Suspend, but also the unplugged half of "AC"
-          // and the plugged half of "Battery".
+          // The one thing an inhibitor cannot do is outrank the system policy.
+          // If logind would ignore the lid - or only lock, or power off - every
+          // mode that expects logind to suspend is a lie, not only Suspend, but
+          // also the unplugged half of "AC" and the plugged half of "Battery".
           PanelSeparator {
             foreground: root.foreground
             visible: root.policyConflicts
@@ -611,10 +866,7 @@ Panel {
             visible: root.policyConflicts
             width: parent.width
             wrapMode: Text.WordWrap
-            text: "A HandleLidSwitch=ignore entry in the system config outranks this plugin, "
-              + "so the modes that rely on suspending may not work (the docked and "
-              + "external-power variants count too). Remove that drop-in "
-              + "(for example /etc/systemd/logind.conf.d/30-lid-ignore.conf) and reload systemd-logind."
+            text: root.conflictMessage()
             color: root.foreground
             font.family: root.bar ? root.bar.fontFamily : Style.font.family
             font.pixelSize: Style.font.caption
@@ -640,7 +892,7 @@ Panel {
             width: parent.width
             wrapMode: Text.WordWrap
             text: "inhibitor " + (inhibitor.running ? "held" : "released")
-              + (root.shouldInhibit && root.lockOnLid ? "  ·  locks on close" : "")
+              + (root.shouldInhibit && root.lockOnLid && !root.nativeLidLock ? "  ·  locks on close" : "")
             color: root.dim
             font.family: root.bar ? root.bar.fontFamily : Style.font.family
             font.pixelSize: Style.font.caption

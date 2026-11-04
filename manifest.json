@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.hominluo.lid",
   "name": "Laptop Lid",
-  "version": "1.0.3",
+  "version": "1.1.0",
   "author": "Homin Luo",
   "license": "MIT",
   "description": "Choose what closing the lid does - keep running, on AC only, on battery only, or suspend - from the bar, with no root, no password prompt and no system config to maintain.",

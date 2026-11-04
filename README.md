@@ -47,6 +47,19 @@ nothing until a mode is picked. "Suspend" here means the normal sleep-to-RAM
 (`s2idle` on modern laptops) — the same thing as `systemctl sleep` unless a
 `SleepOperation=` is configured.
 
+"Plugged in" is not UPower's `OnBattery`. That flag aggregates every
+line-power device, USB-C/UCSI ports included, and a port whose `online`
+attribute goes stale after the cable is pulled keeps it `false` forever — which
+is how an "AC only" policy ends up holding the lid open on battery. The plugin
+asks logind instead (`OnExternalPower`, the flag logind itself branches on),
+and a battery that is reporting *discharging* overrides it, because a draining
+pack means the machine is running on it whatever a port claims.
+
+When logind is docked or sees an external display it uses
+`HandleLidSwitchDocked` (default `ignore`) rather than the action above, so a
+lid close keeps running in every mode. The panel says so instead of pretending
+the machine will sleep.
+
 The bar glyph is the chosen mode's glyph, the same one its row uses in the
 panel: a laptop for **Keep running**, a plug for **Keep running on AC**, a
 battery for **Keep running on battery**, and a "zzz" symbol for **Suspend**.
@@ -64,19 +77,28 @@ open, so the plugin watches the ACPI lid switch itself and runs
 that is not an internal eDP, LVDS or DSI output), because then closing the lid
 is docking, not walking away. The toggle is in the panel.
 
+Omarchy 4.5 already binds `switch:on:Lid Switch` to `omarchy-system-lid-close`,
+which locks the same way and independently of any inhibitor. When that binding
+is present the plugin recognises it, leaves the locking to it, and the toggle
+reports what Omarchy is doing instead of offering a switch that could not turn
+it off. The plugin's own lock remains the fallback for older installs.
+
 The lid switch is read from `/proc/acpi/button/lid/*/state`, with a 3 second
 poll whenever an inhibitor is held. procfs inotify is not dependable across
-firmwares, so the timer is the safety net.
+firmwares, so the timer is the safety net. The first sample after a shell
+restart is treated as a baseline, so restarting the shell with the lid already
+shut does not lock the screen.
 
 ## Requirements
 
 - A laptop with an ACPI lid switch (`/proc/acpi/button/lid/*/state`).
-- `systemd-inhibit` (systemd), `hyprctl` (Hyprland) and the `omarchy` CLI
-  (used for `omarchy system lock`) — all already on Omarchy.
-- **No effective `HandleLidSwitch=ignore` override.** The panel warns if
-  `HandleLidSwitch`, `HandleLidSwitchExternalPower` or `HandleLidSwitchDocked`
-  resolves to `ignore`, because it outranks the plugin and breaks the modes
-  that rely on suspending. Remove the drop-in and
+- `systemd-inhibit` (systemd), `busctl` (systemd, for logind's live policy),
+  `hyprctl` (Hyprland) and the `omarchy` CLI (used for `omarchy system lock`)
+  — all already on Omarchy.
+- **A lid action that actually sleeps.** The panel warns when logind's live
+  policy makes a lid close do something else — `ignore`, `lock`, `poweroff`,
+  `reboot`, `halt`, `kexec` — because that outranks the plugin and breaks the
+  modes that rely on suspending. Remove the drop-in and
   `sudo systemctl reload systemd-logind` if this plugin replaced a manual fix.
 
 ## Install
@@ -106,8 +128,11 @@ prints the resulting mode. An unknown value prints an `invalid mode:` line and
 leaves the saved choice untouched.
 
 `status` returns JSON, including `requested` (what the policy wants),
-`inhibiting` (whether the inhibitor process is actually alive), and `conflict`
-(whether a system config override is in force).
+`inhibiting` (whether the inhibitor process is actually alive), `conflict`
+(whether the live system policy keeps the lid from sleeping), `onBattery`,
+`onExternalPower` and `batteryDischarging` (the inputs behind the per-source
+modes), `lidAction` (what logind would do with a close right now), `docked`,
+`nativeLidLock` and `policy` (the raw `HandleLidSwitch*` values logind reports).
 
 ## Files
 
