@@ -43,6 +43,8 @@ Panel {
 
   readonly property string stateDir: Quickshell.env("HOME") + "/.local/state/omarchy/lid-policy"
   readonly property string statePath: stateDir + "/state.json"
+  readonly property string inhibitScript: Quickshell.env("HOME")
+    + "/.config/omarchy/plugins/io.github.hominluo.lid/bin/lid-inhibit"
 
   readonly property var modeOrder: ["awake", "ac", "battery", "suspend"]
 
@@ -350,9 +352,11 @@ Panel {
     onTriggered: root.cleanupDone = true
   }
 
-  // systemd-inhibit holds the inhibitor for as long as its child lives, so the
-  // child is `sleep infinity` and this process is the switch. Stopping it sends
-  // SIGTERM, which drops the inhibitor and hands the lid back to logind.
+  // systemd-inhibit holds the inhibitor for as long as its child lives. The
+  // child is not `sleep infinity` any more: bin/lid-inhibit watches the shell
+  // and systemd-inhibit's own child watches the supervisor, so a crash, a
+  // SIGKILL or a normal stop all drop the inhibitor within a second instead
+  // of leaving an orphan until the next shell start.
   //
   // Driven by syncInhibitor() instead of a `running:` binding: the binding form
   // breaks the moment JS writes the property, and the retry below has to write
@@ -361,14 +365,7 @@ Panel {
   // this plugin exists to avoid.
   Process {
     id: inhibitor
-    command: [
-      "systemd-inhibit",
-      "--what=handle-lid-switch",
-      "--who=Omarchy lid policy",
-      "--why=Lid-close behavior chosen from the bar",
-      "--mode=block",
-      "sleep", "infinity"
-    ]
+    command: ["bash", root.inhibitScript]
     onExited: {
       if (root.shouldInhibit && root.cleanupDone) rearmTimer.restart()
     }

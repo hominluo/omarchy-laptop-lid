@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.1.1
+
+- The inhibitor can no longer outlive the shell. `systemd-inhibit` used to run
+  `sleep infinity` directly, so an unclean shell failure left it reparented and
+  holding the lid open with nothing on screen; the only cleanup was the next
+  shell start. `bin/lid-inhibit` now watches the shell and exits when it goes,
+  and `systemd-inhibit`'s own child watches the supervisor, so a SIGKILL of
+  either process releases the lock within a second. The lid therefore goes
+  back to logind even if the plugin never starts again.
+
 ## 1.1.0
 
 - `Keep running on AC` no longer keeps the machine awake after the charger is

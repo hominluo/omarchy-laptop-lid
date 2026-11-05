@@ -1,0 +1,36 @@
+#!/bin/sh
+# Hold a logind lid-switch inhibitor only while the shell that started it
+# lives. Quickshell does not take its children with it when it crashes, and
+# a leftover inhibitor with the lid shut would keep the machine awake with
+# nobody there to lock the screen. Two watches cover both failure modes:
+# this process watches its parent (the shell), and systemd-inhibit's child
+# watches this process, so even a SIGKILL of the supervisor releases the
+# lock within a second.
+
+set -u
+
+supervisor=$$
+parent=${PPID}
+inhibitor=
+
+stop() {
+  if [ -n "${inhibitor}" ]; then
+    kill -TERM "${inhibitor}" 2>/dev/null || true
+    wait "${inhibitor}" 2>/dev/null || true
+    inhibitor=
+  fi
+}
+trap 'stop; exit 0' TERM INT HUP EXIT
+
+systemd-inhibit --what=handle-lid-switch \
+  --who="Omarchy lid policy" \
+  --why="Lid-close behavior chosen from the bar" \
+  --mode=block \
+  sh -c 'while kill -0 "$1" 2>/dev/null; do sleep 1; done' sh "${supervisor}" &
+inhibitor=$!
+
+while kill -0 "${parent}" 2>/dev/null && kill -0 "${inhibitor}" 2>/dev/null; do
+  sleep 1
+done
+
+stop
