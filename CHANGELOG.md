@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.1.2
+
+- The local-development note in the README linked the wrong way round: it made
+  `~/Github/Omarchy/omarchy-laptop-lid` point at the installed plugin, so a
+  checkout in the usual place produced a broken link. It now links the checkout
+  into the plugins directory, and says to remove the installed copy first.
+
 ## 1.1.1
 
 - The inhibitor can no longer outlive the shell. `systemd-inhibit` used to run

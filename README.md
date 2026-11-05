@@ -107,10 +107,14 @@ shut does not lock the screen.
 omarchy plugin add https://github.com/hominluo/omarchy-laptop-lid --enable
 ```
 
-or, for local development, keep the repo in place and symlink it:
+or, for local development, clone it and link the checkout into the plugins
+directory (remove the installed copy first, or the link path is taken):
 
 ```bash
-ln -s ~/.config/omarchy/plugins/io.github.hominluo.lid ~/Github/Omarchy/omarchy-laptop-lid
+git clone https://github.com/hominluo/omarchy-laptop-lid ~/Github/Omarchy/omarchy-laptop-lid
+rm -rf ~/.config/omarchy/plugins/io.github.hominluo.lid
+ln -s ~/Github/Omarchy/omarchy-laptop-lid ~/.config/omarchy/plugins/io.github.hominluo.lid
+omarchy restart shell
 ```
 
 The plugin stores its choice in
